@@ -1,0 +1,734 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title><![CDATA[fusueva's blog]]></title>
+  
+  <link href="/atom.xml" rel="self"/>
+  <link href="http://fusueva.com/"/>
+  <updated>2015-10-25T17:08:20.000Z</updated>
+  <id>http://fusueva.com/</id>
+  
+  <author>
+    <name><![CDATA[fusueva]]></name>
+    
+  </author>
+  
+  <generator uri="http://hexo.io/">Hexo</generator>
+  
+  <entry>
+    <title><![CDATA[[转载]传统轮询、长轮询、服务器发送事件与WebSocket]]></title>
+    <link href="http://fusueva.com/2015/10/22/Web-Connectivity/"/>
+    <id>http://fusueva.com/2015/10/22/Web-Connectivity/</id>
+    <published>2015-10-22T06:27:00.000Z</published>
+    <updated>2015-10-25T17:08:20.000Z</updated>
+    <content type="html"><![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/10/22/Web-Connectivity/" target="_blank" rel="external">http://blog.zhangruipeng.me/2015/10/22/Web-Connectivity/</a></p>
+<p>构建网络应用的过程中，我们经常需要与服务器进行持续的通讯以保持双方信息的同步。通常这种持久通讯在不刷新页面的情况下进行，消耗一定的内存资源常驻后台，并且对于用户不可见。本文将简要介绍Web通信中常用的四种方式。</p>
+<a id="more"></a>
+<h3 id="传统轮询(Traditional_Polling)">传统轮询(Traditional Polling)</h3><p>当前Web应用中较常见的一种持续通信方式，通常采取setInterval或者setTimeout实现。例如如果我们想要定时获取并刷新页面上的数据，可以结合Ajax写出如下实现：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line">setInterval(<span class="function"><span class="keyword">function</span>(<span class="params"></span>) </span>&#123;</span><br><span class="line">    $.get(<span class="string">"/path/to/server"</span>, <span class="function"><span class="keyword">function</span>(<span class="params">data, status</span>) </span>&#123;</span><br><span class="line">        <span class="built_in">console</span>.log(data);</span><br><span class="line">    &#125;);</span><br><span class="line">&#125;, <span class="number">10000</span>);</span><br></pre></td></tr></table></figure></p>
+<p>上面的程序会每隔10秒向服务器请求一次数据，并在数据到达后存储。这个实现方法通常可以满足简单的需求，然而同时也存在着很大的缺陷：在网络情况不稳定的情况下，服务器从接收请求、发送请求到客户端接收请求的总时间有可能超过10秒，而请求是以10秒间隔发送的，这样会导致接收的数据到达先后顺序与发送顺序不一致。于是出现了采用setTimeout的轮询方式：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">function</span> <span class="title">poll</span>(<span class="params"></span>) </span>&#123;</span><br><span class="line">    setTimeout(<span class="function"><span class="keyword">function</span>(<span class="params"></span>) </span>&#123;</span><br><span class="line">        $.get(<span class="string">"/path/to/server"</span>, <span class="function"><span class="keyword">function</span>(<span class="params">data, status</span>) </span>&#123;</span><br><span class="line">            <span class="built_in">console</span>.log(data);</span><br><span class="line">            <span class="comment">// 发起下一次请求</span></span><br><span class="line">            poll();</span><br><span class="line">        &#125;);</span><br><span class="line">    &#125;, <span class="number">10000</span>);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure></p>
+<p>程序首先设置10秒后发起请求，当数据返回后再隔10秒发起第二次请求，以此类推。这样的话虽然无法保证两次请求之间的时间间隔为固定值，但是可以保证到达数据的顺序。</p>
+<h3 id="长轮询(Long_Polling)">长轮询(Long Polling)</h3><p>上面两种传统的轮询方式都存在一个严重缺陷：程序在每次请求时都会新建一个HTTP请求，然而并不是每次都能返回所需的新数据。当同时发起的请求达到一定数目时，会对服务器造成较大负担。这时我们可以采用长轮询方式解决这个问题。</p>
+<blockquote>
+<p><strong>注意</strong></p>
+<p>长轮询与以下将要提到的服务器发送事件和WebSocket不能仅仅依靠客户端JavaScript实现，我们同时需要服务器支持并实现相应的技术。</p>
+</blockquote>
+<p>长轮询的基本思想是在每次客户端发出请求后，服务器检查上次返回的数据与此次请求时的数据之间是否有更新，如果有更新则返回新数据并结束此次连接，否则服务器“hold”住此次连接，直到有新数据时再返回相应。而这种长时间的保持连接可以通过设置一个较大的HTTP timeout实现。下面是一个简单的长连接示例：</p>
+<p>服务器（PHP）：<br><figure class="highlight php"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br></pre></td><td class="code"><pre><span class="line"><span class="preprocessor">&lt;?php</span></span><br><span class="line">    <span class="comment">// 示例数据为data.txt</span></span><br><span class="line">    <span class="variable">$filename</span>= dirname(<span class="keyword">__FILE__</span>).<span class="string">"/data.txt"</span>;</span><br><span class="line">    <span class="comment">// 从请求参数中获取上次请求到的数据的时间戳</span></span><br><span class="line">    <span class="variable">$lastmodif</span> = <span class="keyword">isset</span>( <span class="variable">$_GET</span>[<span class="string">"timestamp"</span>])? <span class="variable">$_GET</span>[<span class="string">"timestamp"</span>]: <span class="number">0</span> ;</span><br><span class="line">    <span class="comment">// 将文件的最后一次修改时间作为当前数据的时间戳</span></span><br><span class="line">    <span class="variable">$currentmodif</span> = filemtime(<span class="variable">$filename</span>);</span><br><span class="line"></span><br><span class="line">    <span class="comment">// 当上次请求到的数据的时间戳*不旧于*当前文件的时间戳，使用循环"hold"住当前连接，并不断获取文件的修改时间</span></span><br><span class="line">    <span class="keyword">while</span> (<span class="variable">$currentmodif</span> &lt;= <span class="variable">$lastmodif</span>) &#123;</span><br><span class="line">        <span class="comment">// 每次刷新文件信息的时间间隔为10秒</span></span><br><span class="line">        usleep(<span class="number">10000</span>);</span><br><span class="line">        <span class="comment">// 清除文件信息缓存，保证每次获取的修改时间都是最新的修改时间</span></span><br><span class="line">        clearstatcache();</span><br><span class="line">        <span class="variable">$currentmodif</span> = filemtime(<span class="variable">$filename</span>);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="comment">// 返回数据和最新的时间戳，结束此次连接</span></span><br><span class="line">    <span class="variable">$response</span> = <span class="keyword">array</span>();</span><br><span class="line">    <span class="variable">$response</span>[<span class="string">"msg"</span>] =Date(<span class="string">"h:i:s"</span>).<span class="string">" "</span>.file_get_contents(<span class="variable">$filename</span>);</span><br><span class="line">    <span class="variable">$response</span>[<span class="string">"timestamp"</span>]= <span class="variable">$currentmodif</span>;</span><br><span class="line">    <span class="keyword">echo</span> json_encode(<span class="variable">$response</span>);</span><br><span class="line"><span class="preprocessor">?&gt;</span></span><br></pre></td></tr></table></figure></p>
+<p>客户端：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">function</span> <span class="title">longPoll</span> (<span class="params">timestamp</span>) </span>&#123;</span><br><span class="line">    <span class="keyword">var</span> _timestamp;</span><br><span class="line">    $.get(<span class="string">"/path/to/server?timestamp="</span> + timestamp)</span><br><span class="line">    .done(<span class="function"><span class="keyword">function</span>(<span class="params">res</span>) </span>&#123;</span><br><span class="line">        <span class="keyword">try</span> &#123;</span><br><span class="line">            <span class="keyword">var</span> data = <span class="built_in">JSON</span>.parse(res);</span><br><span class="line">            <span class="built_in">console</span>.log(data.msg);</span><br><span class="line">            _timestamp = data.timestamp;</span><br><span class="line">        &#125; <span class="keyword">catch</span> (e) &#123;&#125;</span><br><span class="line">    &#125;)</span><br><span class="line">    .always(<span class="function"><span class="keyword">function</span>(<span class="params"></span>) </span>&#123;</span><br><span class="line">        setTimeout(<span class="function"><span class="keyword">function</span>(<span class="params"></span>) </span>&#123;</span><br><span class="line">            longPoll(_timestamp || <span class="built_in">Date</span>.now()/<span class="number">1000</span>);</span><br><span class="line">        &#125;, <span class="number">10000</span>);</span><br><span class="line">    &#125;);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure></p>
+<p>长轮询可以有效地解决传统轮询带来的带宽浪费，但是每次连接的保持是以消耗服务器资源为代价的。尤其对于Apache+PHP服务器，由于有默认的“worker threads”数目的限制，当长连接较多时，服务器便无法对新请求进行相应。</p>
+<h3 id="服务器发送事件(Server-Sent_Event)">服务器发送事件(Server-Sent Event)</h3><p>服务器发送事件（以下简称SSE）是HTML 5规范的一个组成部分，可以实现服务器到客户端的单向数据通信。通过SSE，客户端可以自动获取数据更新，而不用重复发送HTTP请求。一旦连接建立，“事件”便会自动被推送到客户端。服务器端SSE通过“事件流(Event Stream)”的格式产生并推送事件。事件流对应的MIME类型为“text/event-stream”，包含四个字段：event、data、id和retry。event表示事件类型，data表示消息内容，id用于设置客户端EventSource对象的“last event ID string”内部属性，retry指定了重新连接的时间。</p>
+<p>服务器（PHP）：<br><figure class="highlight php"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br></pre></td><td class="code"><pre><span class="line"><span class="preprocessor">&lt;?php</span></span><br><span class="line">    header(<span class="string">"Content-Type: text/event-stream"</span>);</span><br><span class="line">    header(<span class="string">"Cache-Control: no-cache"</span>);</span><br><span class="line">    <span class="comment">// 每隔1秒发送一次服务器的当前时间</span></span><br><span class="line">    <span class="keyword">while</span> (<span class="number">1</span>) &#123;</span><br><span class="line">        <span class="variable">$time</span> = date(<span class="string">"r"</span>);</span><br><span class="line">        <span class="keyword">echo</span> <span class="string">"event: ping\n"</span>;</span><br><span class="line">        <span class="keyword">echo</span> <span class="string">"data: The server time is: &#123;$time&#125;\n\n"</span>;</span><br><span class="line">        ob_flush();</span><br><span class="line">        flush();</span><br><span class="line">        sleep(<span class="number">1</span>);</span><br><span class="line">    &#125;</span><br><span class="line"><span class="preprocessor">?&gt;</span></span><br></pre></td></tr></table></figure></p>
+<p>客户端中，SSE借由EventSource对象实现。EventSource包含五个外部属性：onerror, onmessage, onopen, readyState、url，以及两个内部属性：“reconnection time”与“last event ID string”。在onerror属性中我们可以对错误捕获和处理，而onmessage则对应着服务器事件的接收和处理。另外也可以使用addEventListener方法来监听服务器发送事件，根据event字段区分处理。</p>
+<p>客户端：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> eventSource = <span class="keyword">new</span> EventSource(<span class="string">"/path/to/server"</span>);</span><br><span class="line">eventSource.onmessage = <span class="function"><span class="keyword">function</span> (<span class="params">e</span>) </span>&#123;</span><br><span class="line">    <span class="built_in">console</span>.log(e.event, e.data);</span><br><span class="line">&#125;</span><br><span class="line"><span class="comment">// 或者</span></span><br><span class="line">eventSource.addEventListener(<span class="string">"ping"</span>, <span class="function"><span class="keyword">function</span>(<span class="params">e</span>) </span>&#123;</span><br><span class="line">    <span class="built_in">console</span>.log(e.event, e.data);</span><br><span class="line">&#125;, <span class="literal">false</span>);</span><br></pre></td></tr></table></figure></p>
+<p>SSE相较于轮询具有较好的实时性，使用方法也非常简便。然而SSE只支持服务器到客户端单向的事件推送，而且所有版本的IE（包括到目前为止的Microsoft Edge）都不支持SSE。如果需要强行支持IE和部分移动端浏览器，可以尝试<a href="https://github.com/Yaffle/EventSource" target="_blank" rel="external">EventSource Polyfill</a>（本质上仍然是轮询）。SSE的浏览器支持情况如下图所示：<br><img src="/images/server-sent-event.JPG" alt="SSE Support"></p>
+<h3 id="WebSocket">WebSocket</h3><p>WebSocket同样是HTML 5规范的组成部分之一，现标准版本为RFC 6455。WebSocket相较于上述几种连接方式，实现原理较为复杂，用一句话概括就是：客户端向WebSocket服务器通知（notify）一个带有所有接收者ID（recipients IDs）的事件（event），服务器接收后立即通知所有活跃的（active）客户端，只有ID在接收者ID序列中的客户端才会处理这个事件。由于WebSocket本身是基于TCP协议的，所以在服务器端我们可以采用构建TCP Socket服务器的方式来构建WebSocket服务器。这里为了略过协议解析的具体细节，我们采用Node.js的ws库来实现简单的WebSocket服务器。</p>
+<p>服务器（Node.js）：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> WebSocketServer = <span class="built_in">require</span>(<span class="string">'ws'</span>).Server;</span><br><span class="line"><span class="keyword">var</span> wss = <span class="keyword">new</span> WebSocketServer(&#123;port: <span class="number">8080</span>&#125;);</span><br><span class="line"></span><br><span class="line">wss.on(<span class="string">"connection"</span>, <span class="function"><span class="keyword">function</span>(<span class="params">socket</span>) </span>&#123;</span><br><span class="line">    socket.on(<span class="string">"message"</span>, <span class="function"><span class="keyword">function</span>(<span class="params">msg</span>) </span>&#123;</span><br><span class="line">        <span class="built_in">console</span>.log(msg);</span><br><span class="line">        socket.send(<span class="string">"Nice to meet you!"</span>);</span><br><span class="line">    &#125;);</span><br><span class="line">&#125;);</span><br></pre></td></tr></table></figure></p>
+<p>客户端同样可以使用Node.js或者是浏览器实现，这里选用浏览器作为客户端：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// WebSocket 为客户端JavaScript的原生对象</span></span><br><span class="line"><span class="keyword">var</span> ws = <span class="keyword">new</span> WebSocket(<span class="string">"ws://localhost:8080"</span>);</span><br><span class="line">ws.onopen = <span class="function"><span class="keyword">function</span> (<span class="params">event</span>) </span>&#123;</span><br><span class="line">    ws.send(<span class="string">"Hello there!"</span>);</span><br><span class="line">&#125;</span><br><span class="line">ws.onmessage = <span class="function"><span class="keyword">function</span> (<span class="params">event</span>) </span>&#123;</span><br><span class="line">    <span class="built_in">console</span>.log(event.data);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure></p>
+<p>WebSocket同样具有实时性，每次通讯无需重发请求头部，节省带宽，而且它的浏览器支持非常好（详见下图）。<br><img src="/images/websocket.JPG" alt="SSE Support"></p>
+<p>下面总结一下四种通信方式的优缺点：</p>
+<table>
+<thead>
+<tr>
+<th>&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;</th>
+<th>传统轮询</th>
+<th>长轮询</th>
+<th>服务器发送事件</th>
+<th>WebSocket</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>浏览器支持</td>
+<td>几乎所有现代浏览器</td>
+<td>几乎所有现代浏览器</td>
+<td>Firefox 6+ Chrome 6+ Safari 5+ Opera 10.1+</td>
+<td>IE 10+ Edge Firefox 4+ Chrome 4+ Safari 5+ Opera 11.5+</td>
+</tr>
+<tr>
+<td>服务器负载</td>
+<td>较少的CPU资源，较多的内存资源和带宽资源</td>
+<td>与传统轮询相似，但是占用带宽较少</td>
+<td>与长轮询相似，除非每次发送请求后服务器不需要断开连接</td>
+<td>无需循环等待（长轮询），CPU和内存资源不以客户端数量衡量，而是以客户端事件数衡量。四种方式里性能最佳。</td>
+</tr>
+<tr>
+<td>客户端负载</td>
+<td>占用较多的内存资源与请求数。</td>
+<td>与传统轮询相似。</td>
+<td>浏览器中原生实现，占用资源很小。</td>
+<td>同Server-Sent Event。</td>
+</tr>
+<tr>
+<td>延迟</td>
+<td>非实时，延迟取决于请求间隔。</td>
+<td>同传统轮询。</td>
+<td>非实时，默认3秒延迟，延迟可自定义。</td>
+<td>实时。</td>
+</tr>
+<tr>
+<td>实现复杂度</td>
+<td>非常简单。</td>
+<td>需要服务器配合，客户端实现非常简单。</td>
+<td>需要服务器配合，而客户端实现甚至比前两种更简单。</td>
+<td>需要Socket程序实现和额外端口，客户端实现简单。</td>
+</tr>
+</tbody>
+</table>
+<p>最后分享一个通（ji）俗（qi）易（dou）懂（bi）的介绍轮询和WebSocket的文章：<a href="http://zhi.hu/gECL" target="_blank" rel="external">知乎：WebSocket 是什么原理？为什么可以实现持久连接？</a>;</p>
+]]></content>
+    <summary type="html">
+    <![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/10/22/Web-Connectivity/">http://blog.zhangruipeng.me/2015/10/22/Web-Connectivity/</a></p>
+<p>构建网络应用的过程中，我们经常需要与服务器进行持续的通讯以保持双方信息的同步。通常这种持久通讯在不刷新页面的情况下进行，消耗一定的内存资源常驻后台，并且对于用户不可见。本文将简要介绍Web通信中常用的四种方式。</p>]]>
+    
+    </summary>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/tags/JavaScript/"/>
+    
+      <category term="Server" scheme="http://fusueva.com/tags/Server/"/>
+    
+      <category term="Front-End" scheme="http://fusueva.com/categories/Front-End/"/>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/categories/Front-End/JavaScript/"/>
+    
+  </entry>
+  
+  <entry>
+    <title><![CDATA[[转载]JavaScript杂记（四）]]></title>
+    <link href="http://fusueva.com/2015/05/18/JavaScript-Notes-4/"/>
+    <id>http://fusueva.com/2015/05/18/JavaScript-Notes-4/</id>
+    <published>2015-05-18T11:28:45.000Z</published>
+    <updated>2015-10-25T17:09:13.000Z</updated>
+    <content type="html"><![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-4/" target="_blank" rel="external">http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-4/</a></p>
+<p>以下摘自《JavaScript 权威指南（第6版）》<br><a id="more"></a></p>
+<ul>
+<li><p>null和undefined: 可以将null认为是一个特殊的对象，含义是“非对象”，事实上通常认为null是它自有类型的唯一一个成员，表示数字、字符串和对象是“无值”的；undefined是预定义的全局变量（它和null不一样，它不是关键字），它的值就是未定义。null和undefined都不包含任何方法。</p>
+</li>
+<li><p>JavaScript通过调用new Object(x)的方式将原始值（Number、String、Boolean……）进行包装，所以表面上可以对基本类型使用属性的引用，如”x”.length。但是一旦属性引用结束，这个新创建的对象就会销毁。例如：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> s = <span class="string">"test"</span>;</span><br><span class="line">s.len = <span class="number">4</span>;</span><br><span class="line"><span class="keyword">var</span> t = s.len;              <span class="comment">// =&gt; undefined</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p>JavaScript中的原始值与对象有着根本区别，原始值是不可变的。JavaScript中字符串中的所有方法实际上返回的都是一个新的字符串值。例如：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> s = <span class="string">"hello"</span>;</span><br><span class="line">s.toUpperCase();</span><br><span class="line">s                           <span class="comment">// =&gt; "hello"</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p>对象的比较并非值的比较，即使两个对象包含相同的属性和相同的值，他们也是不相等的，各个索引元素完全相等的两个数组也不相等。</p>
+</li>
+<li><p>任何对象和数组（包括空对象/数组）到布尔值的转换都是true。</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">if</span>(&#123;&#125; &amp;&amp; [])</span><br><span class="line">  <span class="built_in">console</span>.log(<span class="number">1</span>);           <span class="comment">// =&gt; 1</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p>if语句将undefined转换为false，但“==”运算符从不试着将其操作数转换为布尔值。</p>
+</li>
+<li><p>!!x 相当于Boolean(x)</p>
+</li>
+<li><p>new Boolean(false)是一个对象而不是原始值，它将转换为true：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">Boolean</span>(<span class="keyword">new</span> <span class="built_in">Boolean</span>(<span class="literal">false</span>)) <span class="comment">// =&gt; true</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p>JavaScript的提前声明特性：JavaScript函数里声明的所有变量（但不涉及赋值）都被“提前”至函数体的顶部，示例如下：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> scope = <span class="string">"global"</span>;</span><br><span class="line"><span class="function"><span class="keyword">function</span> <span class="title">f</span>(<span class="params"></span>) </span>&#123;</span><br><span class="line">  <span class="built_in">console</span>.log(scope);       <span class="comment">// =&gt; undefined</span></span><br><span class="line">  <span class="keyword">var</span> scope = <span class="string">"local"</span>;      <span class="comment">// 变量在这里赋初值，但变量本身在函数体内的任何地方均是有定义的</span></span><br><span class="line">  <span class="built_in">console</span>.log(scope);       <span class="comment">// =&gt; "local"</span></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+</li>
+<li><p>对于嵌套函数来说，每次调用外部函数时，内部函数又会重新定义一遍。因为每次调用外部函数的时候，作用域链都是不同的。</p>
+</li>
+</ul>
+]]></content>
+    <summary type="html">
+    <![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-4/">http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-4/</a></p>
+<p>以下摘自《JavaScript 权威指南（第6版）》<br>]]>
+    
+    </summary>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/tags/JavaScript/"/>
+    
+      <category term="Front-End" scheme="http://fusueva.com/categories/Front-End/"/>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/categories/Front-End/JavaScript/"/>
+    
+  </entry>
+  
+  <entry>
+    <title><![CDATA[[转载]JavaScript杂记（三）]]></title>
+    <link href="http://fusueva.com/2015/04/28/JavaScript-Notes-3/"/>
+    <id>http://fusueva.com/2015/04/28/JavaScript-Notes-3/</id>
+    <published>2015-04-28T05:40:35.000Z</published>
+    <updated>2015-10-25T17:09:08.000Z</updated>
+    <content type="html"><![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-3/" target="_blank" rel="external">http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-3/</a></p>
+<p>阅读<a href="http://liuyangzuo.me/" target="_blank" rel="external">刘同学的博客</a>有感，笔记如下：<br><a id="more"></a></p>
+<ul>
+<li><p>非常有用的本地图片预览，使用了<a href="https://developer.mozilla.org/zh-CN/docs/Web/API/FileReader" target="_blank" rel="external">HTML5 FileReader</a></p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">function</span> <span class="title">previewFile</span>(<span class="params"></span>) </span>&#123;</span><br><span class="line">  <span class="keyword">var</span> preview = <span class="built_in">document</span>.querySelector(<span class="string">'img'</span>);</span><br><span class="line">  <span class="keyword">var</span> file    = <span class="built_in">document</span>.querySelector(<span class="string">'input[type=file]'</span>).files[<span class="number">0</span>];</span><br><span class="line">  <span class="keyword">var</span> reader  = <span class="keyword">new</span> FileReader();</span><br><span class="line"></span><br><span class="line">  reader.onloadend = <span class="function"><span class="keyword">function</span> (<span class="params"></span>) </span>&#123;</span><br><span class="line">    preview.src = reader.result;</span><br><span class="line">  &#125;</span><br><span class="line"></span><br><span class="line">  <span class="keyword">if</span> (file) &#123;</span><br><span class="line">    reader.readAsDataURL(file);</span><br><span class="line">  &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">    preview.src = <span class="string">""</span>;</span><br><span class="line">  &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+<p>浏览器支持情况：<br>Firefox (Gecko) 3.6(1.9.2)+<br>Chrome 7+<br>Internet Explorer* 10+<br>Opera*<br>Safari<br>*IE9有一个File API Lab，Opera从11.10开始部分支持该API.</p>
+</li>
+<li><p><a href="http://liuyangzuo.me/2015/01/30/JavaScript-Prototype-%E4%B8%80/" target="_blank" rel="external">对象原型继承</a>，我的看法：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// 更改了创建方式</span></span><br><span class="line"><span class="built_in">Object</span>.prototype.create = <span class="function"><span class="keyword">function</span>(<span class="params"></span>)</span>&#123;</span><br><span class="line">  <span class="keyword">var</span> F = <span class="function"><span class="keyword">function</span>(<span class="params"></span>)</span>&#123;&#125;;</span><br><span class="line">  F.prototype = <span class="keyword">this</span>;</span><br><span class="line">  <span class="keyword">return</span> F;</span><br><span class="line">&#125;</span><br><span class="line"><span class="comment">// 可以直接从所有Object进行继承，不需要使用Object.create的方式传入</span></span><br><span class="line"><span class="keyword">var</span> stooge = &#123;</span><br><span class="line">  <span class="string">"first-name"</span>:<span class="string">"liu"</span>,</span><br><span class="line">  <span class="string">"last-name"</span>:<span class="string">"yangzuo"</span></span><br><span class="line">&#125;</span><br><span class="line"><span class="keyword">var</span> another1_stooge = stooge.create();</span><br><span class="line">another1_stooge[<span class="string">"first-name"</span>] = <span class="string">"zhang"</span>;</span><br><span class="line">stooge[<span class="string">"first-name"</span>];          <span class="comment">// "liu"</span></span><br><span class="line">another2_stooge[<span class="string">"first-name"</span>]; <span class="comment">// "zhang"</span></span><br></pre></td></tr></table></figure>
+<p>这与<a href="http://liuyangzuo.me/2015/04/17/Deep-copy/" target="_blank" rel="external">对象的深拷贝</a>是不同的，深拷贝知识将属性和方法进行复制，并不更改原型链：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">Object</span>.prototype.clone = <span class="function"><span class="keyword">function</span>(<span class="params"></span>)</span>&#123;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">var</span> o = <span class="keyword">this</span>.constructor === <span class="built_in">Array</span> ? [] : &#123;&#125;;</span><br><span class="line">  <span class="keyword">for</span>(<span class="keyword">var</span> e <span class="keyword">in</span> <span class="keyword">this</span>)&#123;</span><br><span class="line">              o[e] = <span class="keyword">typeof</span> <span class="keyword">this</span>[e] === <span class="string">"object"</span> ? <span class="keyword">this</span>[e].clone() : <span class="keyword">this</span>[e];</span><br><span class="line">  &#125;</span><br><span class="line">    <span class="keyword">return</span> o;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+</li>
+<li><p>关于<a href="http://liuyangzuo.me/2015/02/04/JavaScript-%E4%BA%8B%E4%BB%B6/" target="_blank" rel="external">事件冒泡与事件捕获</a></p>
+<blockquote>
+<p>一般浏览级事件传播默认是事件冒泡,我们可以设置事件传播的方式是冒泡方式,还是捕获方式。上面所讲的addEventListener函数的第三个参数就是选择事件传播的方式，传入true事件传播方式为事件捕获,传入false事件传播方式为事件冒泡。</p>
+</blockquote>
+<p>另附：<a href="http://blog.csdn.net/woshixuye/article/details/7422985" target="_blank" rel="external">jQuery中return false,e.preventDefault(),e.stopPropagation()的区别</a></p>
+</li>
+<li><p><a href="http://liuyangzuo.me/2015/01/14/div%E6%B0%B4%E5%B9%B3%E7%AB%96%E7%9B%B4%E5%B1%85%E4%B8%AD/" target="_blank" rel="external">怎么让一个div元素保持适中水平,竖直居中?</a>，上面的方法只能用来解决定宽定高的容器居中问题，其实使用Table配合</p>
+<figure class="highlight css"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">text-align</span><span class="pseudo">:center</span>;<span class="tag">verticle-align</span><span class="pseudo">:middle</span>;</span><br></pre></td></tr></table></figure>
+<p>效果更佳。</p>
+</li>
+<li><p><a href="http://liuyangzuo.me/2014/11/09/jQuery%E5%AF%B9%E8%B1%A1%E8%BD%AC%E5%8C%96DOM%E5%AF%B9%E8%B1%A1/" target="_blank" rel="external">jQuery对象转化DOM对象</a>，仅需将jQuery对象当作数组即可，新技能get。</p>
+</li>
+<li><p><a href="http://liuyangzuo.me/2014/11/03/%E5%A5%BD%E7%8E%A9%E7%9A%84JavaScript-%E4%BA%8C/" target="_blank" rel="external">好玩的JavaScript(二)</a></p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> SideBar = (<span class="function"><span class="keyword">function</span> <span class="title">Module</span>(<span class="params"></span>)</span>&#123;</span><br><span class="line">  <span class="keyword">var</span> SideBar = &#123;</span><br><span class="line">    num : <span class="number">1</span>,</span><br><span class="line">    animation : <span class="function"><span class="keyword">function</span>(<span class="params"></span>)</span>&#123;</span><br><span class="line">      <span class="function"><span class="keyword">function</span> <span class="title">f</span>(<span class="params"></span>)</span>&#123;</span><br><span class="line">        <span class="built_in">console</span>.log(<span class="keyword">this</span> == <span class="built_in">window</span>);</span><br><span class="line">      &#125;</span><br><span class="line">      <span class="built_in">console</span>.log(<span class="keyword">this</span> == SideBar);</span><br><span class="line">      f();</span><br><span class="line">    &#125;</span><br><span class="line">  &#125;</span><br><span class="line">  <span class="keyword">return</span> SideBar;</span><br><span class="line">&#125;());</span><br><span class="line"><span class="built_in">console</span>.log(SideBar.num); <span class="comment">// 1</span></span><br><span class="line">SideBar.animation();      <span class="comment">// true -&gt; this === Sidebar</span></span><br><span class="line">                          <span class="comment">// true -&gt; this === window</span></span><br></pre></td></tr></table></figure>
+<p>注意，倒数第二行的Sidebar是闭包中的Sidebar，而不是立即函数前的Sidebar。这涉及到<a href="http://liuyangzuo.me/2014/10/31/JavaScript%E4%B8%AD%E7%9A%84this/" target="_blank" rel="external">JavaScript中的this</a>：</p>
+<blockquote>
+<p>如果嵌套函数作为函数调用,其this值不是全局对象(非严格模式)就是undefined(严格模式)</p>
+</blockquote>
+</li>
+<li><p>近来发现JavaScript不是唯一拥有闭包特性的语言。PHP和Python等也有……（囧）</p>
+</li>
+</ul>
+<p>通篇略读完，受益匪浅。</p>
+]]></content>
+    <summary type="html">
+    <![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-3/">http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-3/</a></p>
+<p>阅读<a href="http://liuyangzuo.me/">刘同学的博客</a>有感，笔记如下：<br>]]>
+    
+    </summary>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/tags/JavaScript/"/>
+    
+      <category term="Front-End" scheme="http://fusueva.com/categories/Front-End/"/>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/categories/Front-End/JavaScript/"/>
+    
+  </entry>
+  
+  <entry>
+    <title><![CDATA[[转载]JavaScript杂记（二）]]></title>
+    <link href="http://fusueva.com/2015/03/29/JavaScript-Notes-2/"/>
+    <id>http://fusueva.com/2015/03/29/JavaScript-Notes-2/</id>
+    <published>2015-03-29T14:47:10.000Z</published>
+    <updated>2015-10-25T17:09:04.000Z</updated>
+    <content type="html"><![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-2/" target="_blank" rel="external">http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-2/</a></p>
+<p>以下摘自《JavaScript 语言精粹》<br><a id="more"></a></p>
+<ul>
+<li><p>length属性的值是其数组的最大整数属性名加上1，但它不一定等于数组里的属性的个数：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> myArray = [];</span><br><span class="line">myArray.length            <span class="comment">// 0</span></span><br><span class="line"></span><br><span class="line">myArray[<span class="number">1000000</span>] = <span class="literal">true</span>;</span><br><span class="line">myArray.length            <span class="comment">// 1000001</span></span><br><span class="line"><span class="comment">// myArray只包含一个属性</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p>判断对象是否为数组的好方法：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> is_array = <span class="function"><span class="keyword">function</span> (<span class="params">value</span>) </span>&#123;</span><br><span class="line">  <span class="keyword">return</span> <span class="built_in">Object</span>.prototype.toString.apply(value) === <span class="string">'[object Array]'</span>;</span><br><span class="line">&#125;;</span><br></pre></td></tr></table></figure>
+</li>
+<li><p>Array的sort方法不能对一组数字进行正确排序：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> n = [<span class="number">4</span>, <span class="number">8</span>, <span class="number">15</span>, <span class="number">16</span>, <span class="number">23</span>, <span class="number">42</span>];</span><br><span class="line">n.sort();</span><br><span class="line"><span class="comment">// n = [15, 16, 23, 4, 42, 8]</span></span><br></pre></td></tr></table></figure>
+<p>JavaScript的默认比较函数把要被排序的元素都视为字符串，所以得到了一个错的离谱的结果，解决方法如下：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">n.sort(<span class="function"><span class="keyword">function</span> (<span class="params">a, b</span>) </span>&#123;</span><br><span class="line">  <span class="keyword">return</span> a - b;</span><br><span class="line">&#125;);</span><br></pre></td></tr></table></figure>
+</li>
+<li><p>摩尔定律并不适用于电池。</p>
+</li>
+<li><p>NaN是IEEE 754中定义的一个特殊的数量值，它表示的是<code>不是一个数字</code>，但是下面表达式返回的是<code>true</code>：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">typeof</span> <span class="literal">NaN</span> === <span class="string">'number'</span> <span class="comment">// true</span></span><br></pre></td></tr></table></figure>
+<p>所以判断是否为数字的最佳方法是：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> isNumber = <span class="function"><span class="keyword">function</span> (<span class="params">value</span>) </span>&#123;</span><br><span class="line">  <span class="keyword">return</span> <span class="keyword">typeof</span> value === <span class="string">'number'</span> &amp;&amp; <span class="built_in">isFinite</span>(value);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+</li>
+<li><p>一门语言最糟糕的特性不是那些一看就知道很危险或者没有价值的特性，那些特性很容易被避免。最糟糕的特性就像带刺的玫瑰，它们是有用的，但也是危险的。</p>
+</li>
+<li><p>用圆括号把JSON文本括起来是一种避免JavaScript语法歧义的变通方案。</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> myData = <span class="built_in">eval</span>(<span class="string">'('</span> + myJSONText + <span class="string">')'</span>);</span><br></pre></td></tr></table></figure></li>
+</ul>
+]]></content>
+    <summary type="html">
+    <![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-2/">http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-2/</a></p>
+<p>以下摘自《JavaScript 语言精粹》<br>]]>
+    
+    </summary>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/tags/JavaScript/"/>
+    
+      <category term="Front-End" scheme="http://fusueva.com/categories/Front-End/"/>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/categories/Front-End/JavaScript/"/>
+    
+  </entry>
+  
+  <entry>
+    <title><![CDATA[[转载]Ripple Button（涟漪按钮）原生JavaScript实现]]></title>
+    <link href="http://fusueva.com/2015/03/26/JavaScript-Ripple-Button/"/>
+    <id>http://fusueva.com/2015/03/26/JavaScript-Ripple-Button/</id>
+    <published>2015-03-26T13:44:28.000Z</published>
+    <updated>2015-10-25T17:08:34.000Z</updated>
+    <content type="html"><![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/26/JavaScript-Ripple-Button/" target="_blank" rel="external">http://blog.zhangruipeng.me/2015/03/26/JavaScript-Ripple-Button/</a></p>
+<p>最近Android 5.0中Ripple Button比较火爆的流行起来，在Web前端中其实现的原理较为简单。本文将尝试通过不使用第三方JavaScript库的情况下结合HTML与CSS实现Web前端中的Ripple Button。<br><a href="/demo/ripple-buttons.html">点击测试</a>（该示例在Chrome 41.0和IE 9/10/11下测试通过。）</p>
+<a id="more"></a>
+<p>HTML和CSS部分代码比较简单：<br><figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br></pre></td><td class="code"><pre><span class="line"><span class="doctype">&lt;!DOCTYPE html&gt;</span></span><br><span class="line"><span class="tag">&lt;<span class="title">html</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;<span class="title">head</span>&gt;</span></span><br><span class="line">  <span class="tag">&lt;<span class="title">title</span>&gt;</span>Ripple Buttons<span class="tag">&lt;/<span class="title">title</span>&gt;</span></span><br><span class="line">  <span class="tag">&lt;<span class="title">style</span> <span class="attribute">type</span>=<span class="value">"text/css"</span>&gt;</span><span class="css"></span><br><span class="line">    <span class="comment">/*</span><br><span class="line">      button作为容器，其position需要设置为absolute来承载ripple背景</span><br><span class="line">      overflow:hidden用于掩盖ripple超出button的部分</span><br><span class="line">     */</span></span><br><span class="line">    <span class="tag">button</span> <span class="rules">&#123;</span><br><span class="line">      <span class="rule"><span class="attribute">position</span>:<span class="value"> relative</span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">background-color</span>:<span class="value"> transparent</span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">border</span>:<span class="value"> none</span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">width</span>:<span class="value"> <span class="number">120px</span></span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">height</span>:<span class="value"> <span class="number">36px</span></span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">overflow</span>:<span class="value"> hidden</span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">color</span>:<span class="value"> <span class="hexcolor">#fff</span></span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">border-radius</span>:<span class="value"> <span class="number">4px</span></span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">outline</span>:<span class="value"> none</span></span>;</span><br><span class="line">    &#125;</span></span><br><span class="line">    <span class="comment">/*</span><br><span class="line">      button中的div为按钮的ripple背景，由JavaScript动态生成</span><br><span class="line">     */</span></span><br><span class="line">    <span class="tag">button</span> &gt; <span class="tag">div</span> <span class="rules">&#123;</span><br><span class="line">      <span class="rule"><span class="attribute">position</span>:<span class="value">absolute</span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">background-color</span>:<span class="value"> <span class="function">rgba</span>(<span class="number">255</span>,<span class="number">255</span>,<span class="number">255</span>,<span class="number">0.3</span>)</span></span>;</span><br><span class="line">      <span class="rule"><span class="attribute">border-radius</span>:<span class="value"> <span class="number">50%</span></span></span>;</span><br><span class="line">    &#125;</span></span><br><span class="line">    <span class="class">.success</span> <span class="rules">&#123;<span class="rule"><span class="attribute">background-color</span>:<span class="value"> <span class="hexcolor">#04A43B</span></span></span>;&#125;</span></span><br><span class="line">    <span class="class">.info</span> <span class="rules">&#123;<span class="rule"><span class="attribute">background-color</span>:<span class="value"> <span class="hexcolor">#0C9AF2</span></span></span>;&#125;</span></span><br><span class="line">    <span class="class">.danger</span> <span class="rules">&#123;<span class="rule"><span class="attribute">background-color</span>:<span class="value"> <span class="hexcolor">#dd0d32</span></span></span>;&#125;</span></span><br><span class="line">    <span class="class">.long</span> <span class="rules">&#123;<span class="rule"><span class="attribute">height</span>:<span class="value"> <span class="number">200px</span></span></span>; <span class="rule"><span class="attribute">width</span>:<span class="value"> <span class="number">90px</span></span></span>;&#125;</span></span><br><span class="line">  </span><span class="tag">&lt;/<span class="title">style</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;/<span class="title">head</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;<span class="title">body</span>&gt;</span></span><br><span class="line">  <span class="tag">&lt;<span class="title">button</span> <span class="attribute">class</span>=<span class="value">"success"</span>&gt;</span>Click Me!<span class="tag">&lt;/<span class="title">button</span>&gt;</span></span><br><span class="line">  <span class="tag">&lt;<span class="title">button</span> <span class="attribute">class</span>=<span class="value">"info"</span>&gt;</span>Click Me!<span class="tag">&lt;/<span class="title">button</span>&gt;</span></span><br><span class="line">  <span class="tag">&lt;<span class="title">button</span> <span class="attribute">class</span>=<span class="value">"danger long"</span>&gt;</span>Click Me!<span class="tag">&lt;/<span class="title">button</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;/<span class="title">body</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;/<span class="title">html</span>&gt;</span></span><br></pre></td></tr></table></figure></p>
+<p>Ripple Button的结构如下图所示：<br><img src="/images/ripple-button-proto.png" alt=""><br>首先我们需要获得用户在button中点击的位置。可以采用onclick事件的offsetX和offsetY来获得用户点击位置相对于被点击的元素的偏移距离，即图中的圆心(x,y)。然后，我们假设按钮ripple背景的半径为Radius，则背景的top和left值可用下面的公式计算：</p>
+<blockquote>
+<p>top = y - Radius; left = x - Radius;</p>
+</blockquote>
+<p>在计算出ripple的位置之后，下一步需要计算出ripple的最大半径。其最大半径应该满足无论在按钮中的哪一个位置发生点击（也即是无论圆的圆心在何处），都能满足动画完成时按钮的所有部分都被ripple覆盖。所以取圆心到达按钮边界最远的距离为ripple的最大半径（也就是圆心到按钮四个角中最远的距离），计算方法如下：</p>
+<blockquote>
+<p>maxRadiusX = max(buttonWidth - x, x);<br>maxRadiusY = max(buttonHeight - y, y);<br>maxRadius = sqrt(maxRadiusX^2 + maxRadiusY^2);</p>
+</blockquote>
+<p>现在知道了ripple背景的位置和最大半径（maxRadius），剩下的工作就只要让圆的半径在一定的时间内从零增长到maxRadius，产生动画效果。在JavaScript中，可以使用setInterval来完成定时重复执行的任务。<br><figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">setInterval(<span class="function"><span class="keyword">function</span>, <span class="title">interval</span>);</span></span><br></pre></td></tr></table></figure></p>
+<p>setInterval函数包含两个参数，第一个是你需要执行的函数，另一个是定时的时间间隔（单位为ms）。我们只需每隔很小一段时间将ripple的半径增加一定值，就可以实现ripple的动态变大效果了。但是需要注意的是，当ripple的半径达到最大值时，需要使用clearInterval来取消定时器来终止动画。<br>最终，我们将整个动画事件绑定到button的mousedown事件上，这样当用户按下按钮时，按钮上就会产生涟漪效果。同理，我们可以在button的mouseup事件中绑定ripple的消失动画。Ripple的消失动画同样通过setInterval来完成。每隔一定时间，ripple的透明度就会减少一定值，直到ripple完全透明。</p>
+<p>完整的JavaScript代码如下：<br><figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> buttons = <span class="built_in">document</span>.getElementsByTagName(<span class="string">'button'</span>), speed = <span class="number">8</span>;</span><br><span class="line"><span class="keyword">for</span> (<span class="keyword">var</span> i = <span class="number">0</span>; i &lt; buttons.length; i++) &#123;</span><br><span class="line">  buttons[i].onmousedown = <span class="function"><span class="keyword">function</span> (<span class="params">e</span>) </span>&#123;</span><br><span class="line">    <span class="keyword">var</span> e = e || <span class="built_in">window</span>.event,</span><br><span class="line">        offsetX = e.offsetX,</span><br><span class="line">        offsetY = e.offsetY,</span><br><span class="line">        radiusX = (<span class="keyword">this</span>.offsetWidth - offsetX &gt; offsetX?<span class="keyword">this</span>.offsetWidth - offsetX:offsetX),</span><br><span class="line">        radiusY = (<span class="keyword">this</span>.offsetHeight - offsetY &gt; offsetY?<span class="keyword">this</span>.offsetHeight - offsetY:offsetY),</span><br><span class="line">        offsetSize = <span class="built_in">Math</span>.sqrt(<span class="built_in">Math</span>.pow(radiusX,<span class="number">2</span>) + <span class="built_in">Math</span>.pow(radiusY,<span class="number">2</span>)),</span><br><span class="line">        inner = <span class="built_in">document</span>.createElement(<span class="string">'div'</span>);</span><br><span class="line">   <span class="keyword">this</span>.appendChild(inner);</span><br><span class="line">    <span class="keyword">var</span> interval = setInterval(<span class="function"><span class="keyword">function</span> (<span class="params"></span>) </span>&#123;</span><br><span class="line">      inner.style.width = (inner.offsetWidth + speed) + <span class="string">'px'</span>;</span><br><span class="line">      inner.style.height = (inner.offsetWidth + speed) + <span class="string">'px'</span>;</span><br><span class="line">      inner.style.left = (offsetX - inner.offsetWidth/<span class="number">2</span>) + <span class="string">'px'</span>;</span><br><span class="line">      inner.style.top = (offsetY - inner.offsetHeight/<span class="number">2</span>) + <span class="string">'px'</span>;</span><br><span class="line">      inner.style.opacity = inner.offsetWidth/offsetSize/<span class="number">2</span>;</span><br><span class="line">      <span class="keyword">if</span>(inner.offsetWidth &gt;= offsetSize*<span class="number">2</span> &amp;&amp; inner.offsetHeight &gt;= offsetSize*<span class="number">2</span>) &#123;</span><br><span class="line">        clearInterval(interval);</span><br><span class="line">      &#125;</span><br><span class="line">    &#125;, <span class="number">10</span>);</span><br><span class="line">  &#125;</span><br><span class="line">  buttons[i].onmouseup = <span class="function"><span class="keyword">function</span> (<span class="params">e</span>) </span>&#123;</span><br><span class="line">    <span class="keyword">var</span> e = e || <span class="built_in">window</span>.event,</span><br><span class="line">        this_ = <span class="keyword">this</span>,</span><br><span class="line">        inner = <span class="keyword">this</span>.children[<span class="number">0</span>];</span><br><span class="line">    <span class="keyword">var</span> interval = setInterval(<span class="function"><span class="keyword">function</span> (<span class="params"></span>) </span>&#123;</span><br><span class="line">      inner.style.opacity = inner.style.opacity - speed/this_.offsetWidth;</span><br><span class="line">      <span class="keyword">if</span>(inner.style.opacity &lt;= <span class="number">0</span>) &#123;</span><br><span class="line">        this_.removeChild(inner);</span><br><span class="line">        clearInterval(interval);</span><br><span class="line">      &#125;</span><br><span class="line">    &#125;, <span class="number">10</span>);</span><br><span class="line">  &#125;</span><br><span class="line">&#125;;</span><br></pre></td></tr></table></figure></p>
+<p><a href="/demo/ripple-buttons.html">点击测试</a></p>
+]]></content>
+    <summary type="html">
+    <![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/26/JavaScript-Ripple-Button/">http://blog.zhangruipeng.me/2015/03/26/JavaScript-Ripple-Button/</a></p>
+<p>最近Android 5.0中Ripple Button比较火爆的流行起来，在Web前端中其实现的原理较为简单。本文将尝试通过不使用第三方JavaScript库的情况下结合HTML与CSS实现Web前端中的Ripple Button。<br><a href="/demo/ripple-buttons.html">点击测试</a>（该示例在Chrome 41.0和IE 9/10/11下测试通过。）</p>]]>
+    
+    </summary>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/tags/JavaScript/"/>
+    
+      <category term="Front-End" scheme="http://fusueva.com/categories/Front-End/"/>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/categories/Front-End/JavaScript/"/>
+    
+  </entry>
+  
+  <entry>
+    <title><![CDATA[[转载]JavaScript杂记（一）]]></title>
+    <link href="http://fusueva.com/2015/03/16/JavaScript-Notes-1/"/>
+    <id>http://fusueva.com/2015/03/16/JavaScript-Notes-1/</id>
+    <published>2015-03-16T01:13:36.000Z</published>
+    <updated>2015-10-25T17:08:59.000Z</updated>
+    <content type="html"><![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-1/" target="_blank" rel="external">http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-1/</a></p>
+<p>以下摘自《JavaScript 权威指南（第6版）》<br><a id="more"></a></p>
+<ul>
+<li><p>如果当前语句和下一行语句无法合并解析，JavaScript则在第一行后填补分号。除了：①涉及return，break和continue语句，如果这三个关键字后紧跟着换行，JavaScript则会在换行处填补分号。</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">return</span></span><br><span class="line"><span class="literal">true</span>;</span><br></pre></td></tr></table></figure>
+<p>JavaScript会解析成</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">return</span>;<span class="literal">true</span>;</span><br></pre></td></tr></table></figure>
+<p>而代码本意是</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">return</span> <span class="literal">true</span>;</span><br></pre></td></tr></table></figure>
+<p>②“++”“–”运算符。他们可以作为表达式的前缀，也可以作为表达式的后缀。如果将其用作后缀表达式，他和表达式应当在同一行。否则行尾将填补分号，同时“++”“–”将作为下一行代码的前缀操作符并与之一起解析。</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">x</span><br><span class="line">++</span><br><span class="line">y</span><br></pre></td></tr></table></figure>
+<p>这段代码将被解析为“x;++y”；而不是“x++;y”。</p>
+</li>
+<li><p>下溢（underflow）是当运算结果无限接近于零并比JavaScript能表示的最小值还小时的一种情况。这种情况下，JavaScript会返回0。负数下溢时会返回“负零”。零和负零几乎相等，除了下种情况：</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> zero = <span class="number">0</span>;</span><br><span class="line"><span class="keyword">var</span> negz = -<span class="number">0</span>;</span><br><span class="line"><span class="number">1</span>/zero === <span class="number">1</span>/negz <span class="comment">// =&gt; false: 正无穷大和负无穷大不相等</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p>被零整除在JavaScript中并不报错，而返回无穷大（Infinity）和负无穷大（-Infinity）。但是零除以零没有意义，结果返回一个非数字（not-a-number），即NaN。无穷大除以无穷大、给任意负数作开方运算或者算数运算符与不是数字或无法转换为数字的操作数一起使用时都会返回NaN。</p>
+</li>
+<li><p>NaN与任何值都不相等，包括自身。无法通过x==NaN来判断x是否为NaN，但可以通过x!=x来判断，或者函数isNaN()。JavaScript中又一个类似函数为isFinite()，在参数部位NaN、Infinity和-Infinity时返回true。</p>
+</li>
+<li><p>JavaScript中数字不能精确表述会带来一些问题。如：</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> x = <span class="number">.3</span> - <span class="number">.2</span>;</span><br><span class="line"><span class="keyword">var</span> y = <span class="number">.2</span> - <span class="number">.1</span>;</span><br><span class="line">x == y <span class="comment">// =&gt; false: 两值不相等</span></span><br><span class="line">x == <span class="number">.1</span> <span class="comment">// =&gt; false: .3 - .2 != .1</span></span><br><span class="line">y == <span class="number">.1</span> <span class="comment">// =&gt; true: .2 - .1 == .1</span></span><br></pre></td></tr></table></figure>
+<p>由于舍入误差，0.3和0.2之间的近似误差实际上并不等于0.2和0.1之间的近似误差。在JavaScript真实运行环境中，0.3 - 0.2 = 0.099 999 999 999 999 98。所以在涉及金融等计算时，最好使用“分”而不是“元”作为单位。</p>
+</li>
+<li><p>转义字符中，如果“\”与其后的字符不属于规定的转义字符，则忽略“\”。比如，“#”和“#”等价。</p>
+</li>
+</ul>
+]]></content>
+    <summary type="html">
+    <![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-1/">http://blog.zhangruipeng.me/2015/03/16/JavaScript-Notes-1/</a></p>
+<p>以下摘自《JavaScript 权威指南（第6版）》<br>]]>
+    
+    </summary>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/tags/JavaScript/"/>
+    
+      <category term="Front-End" scheme="http://fusueva.com/categories/Front-End/"/>
+    
+      <category term="JavaScript" scheme="http://fusueva.com/categories/Front-End/JavaScript/"/>
+    
+  </entry>
+  
+  <entry>
+    <title><![CDATA[[转载]前端工作面试问题（一）]]></title>
+    <link href="http://fusueva.com/2015/03/15/JavaScript-Interview-1/"/>
+    <id>http://fusueva.com/2015/03/15/JavaScript-Interview-1/</id>
+    <published>2015-03-14T16:00:00.000Z</published>
+    <updated>2015-10-25T17:08:47.000Z</updated>
+    <content type="html"><![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/15/JavaScript-Interview-1/" target="_blank" rel="external">http://blog.zhangruipeng.me/2015/03/15/JavaScript-Interview-1/</a></p>
+<p><strong>备注:</strong> 本 repo 包含了一些前端面试问题用于考查候选者。不建议对单个候选者问及每个问题（那需要好几个小时）。只要从列表里挑选一些，就能帮助你考查候选者是否具备所需要的技能了。</p>
+<p><a href="http://rmurphey.com/" target="_blank" rel="external">Rebecca Murphey</a> 的 <a href="http://rmurphey.com/blog/2012/04/12/a-baseline-for-front-end-developers/" target="_blank" rel="external">Baseline For Front-End Developers</a> 是你在准备面试前应该阅读的绝佳资源。</p>
+<p><strong>记住：</strong> 很多问题都是开放的，可以引发有趣的讨论。这比直接的答案更能体现此人的能力。<br><a id="more"></a></p>
+<h2 id="目录"><a name="toc">目录</a></h2><ol>
+<li><a href="#contributors">最初的贡献者</a></li>
+<li><a href="#general">常见问题</a></li>
+<li><a href="#html">HTML 相关问题</a></li>
+<li><a href="#css">CSS 相关问题</a></li>
+<li><a href="#js">JS 相关问题</a></li>
+<li><a href="#jquery">jQuery 相关问题</a></li>
+<li><a href="#jscode">代码相关的问题</a></li>
+<li><a href="#fun">有趣的问题</a></li>
+<li><a href="#references">其他参考资料</a></li>
+<li><a href="#license">协议</a></li>
+</ol>
+<p>###<a name="contributors">最初贡献者</a></p>
+<p>这里大部分的面试题都摘抄自 <a href="http://paulirish.com" target="_blank" rel="external">Paul Irish</a> (<a href="http://twitter.com/paul_irish" target="_blank" rel="external">@paul_irish</a>) 在 <a href="http://oksoclap.com/" target="_blank" rel="external">oksoclap</a> 创建的帖子，这份原帖的贡献者还有：</p>
+<ul>
+<li><a href="http://twitter.com/bentruyman" target="_blank" rel="external">@bentruyman</a> - <a href="http://bentruyman.com" target="_blank" rel="external">http://bentruyman.com</a></li>
+<li><a href="http://twitter.com/cowboy" target="_blank" rel="external">@cowboy</a> - <a href="http://benalman.com" target="_blank" rel="external">http://benalman.com</a></li>
+<li><a href="http://ajpiano" target="_blank" rel="external">@ajpiano</a> - <a href="http://ajpiano.com" target="_blank" rel="external">http://ajpiano.com</a></li>
+<li><a href="http://twitter.com/slexaxton" target="_blank" rel="external">@SlexAxton</a> - <a href="http://alexsexton.com" target="_blank" rel="external">http://alexsexton.com</a></li>
+<li><a href="http://twitter.com/boazsender" target="_blank" rel="external">@boazsender</a> - <a href="http://boazsender.com" target="_blank" rel="external">http://boazsender.com</a></li>
+<li><a href="http://twitter.com/miketaylr" target="_blank" rel="external">@miketaylr</a> - <a href="http://miketaylr.com" target="_blank" rel="external">http://miketaylr.com</a></li>
+<li><a href="http://twitter.com/vladikoff" target="_blank" rel="external">@vladikoff</a> - <a href="http://vladfilippov.com" target="_blank" rel="external">http://vladfilippov.com</a></li>
+<li><a href="http://twitter.com/gf3" target="_blank" rel="external">@gf3</a> - <a href="http://gf3.ca" target="_blank" rel="external">http://gf3.ca</a></li>
+<li><a href="http://twitter.com/jon_neal" target="_blank" rel="external">@jon_neal</a> - <a href="http://twitter.com/jon_neal" target="_blank" rel="external">http://twitter.com/jon_neal</a></li>
+<li><a href="http://twitter.com/wookiehangover" target="_blank" rel="external">@wookiehangover</a> - <a href="http://wookiehangover.com" target="_blank" rel="external">http://wookiehangover.com</a></li>
+<li><a href="http://twitter.com/darcy" target="_blank" rel="external">@darcy_clarke</a> - <a href="http://darcyclarke.me" target="_blank" rel="external">http://darcyclarke.me</a></li>
+<li><a href="http://twitter.com/iansym" target="_blank" rel="external">@iansym</a></li>
+</ul>
+<p>###<a name="general">常见问题：</a></p>
+<ul>
+<li><p>你在昨天/本周学到了什么？</p>
+</li>
+<li><p>编写代码的哪些方面能够使你兴奋或感兴趣？</p>
+</li>
+<li><p>在制作一个Web应用或Web站点的过程中，你是如何考虑它的UI、安全性、高性能、SEO、可维护性以及技术因素的？</p>
+</li>
+<li><p>谈谈你喜欢的开发环境。(例如操作系统，编辑器，浏览器，工具等等。)</p>
+</li>
+<li><p>你最熟悉哪一套版本控制系统？</p>
+</li>
+<li><p>你能描述一下当你制作一个网页的工作流程吗？</p>
+</li>
+<li><p>你能描述一下渐进增强和优雅降级之间的不同吗?</p>
+<ul>
+<li>如果提到了特性检测，可以加分。</li>
+</ul>
+</li>
+<li><p>假若你有5个不同的 CSS 文件, 加载进页面的最好方式是?</p>
+<ul>
+<li>文件拼合</li>
+</ul>
+</li>
+</ul>
+<ul>
+<li><p>你如何对网站的文件和资源进行优化？</p>
+<ul>
+<li>期待的解决方案包括：<ul>
+<li>文件合并</li>
+<li>文件最小化/文件压缩</li>
+<li>使用 CDN 托管</li>
+<li>缓存的使用</li>
+<li>其他</li>
+</ul>
+</li>
+</ul>
+</li>
+<li><p>为什么利用多个域名来提供网站资源会更有效？</p>
+<ul>
+<li>浏览器同一时间可以从一个域名下载多少资源？</li>
+<li>有什么例外吗？<ul>
+<li>加分项： 指出在手机端可能有负面影响 (<a href="http://www.mobify.com/blog/domain-sharding-bad-news-mobile-performance/" target="_blank" rel="external">http://www.mobify.com/blog/domain-sharding-bad-news-mobile-performance/</a>)</li>
+<li>加分项： HTTP2 / SPDY</li>
+</ul>
+</li>
+</ul>
+</li>
+<li><p>请说出三种减少页面加载时间的方法。（加载时间指感知的时间或者实际加载时间）</p>
+</li>
+<li><p>如果你参与到一个项目中，发现他们使用 Tab 来缩进代码，但是你喜欢空格，你会怎么做？</p>
+<ul>
+<li>建议这个项目使用像 EditorConfig (<a href="http://editorconfig.org/" target="_blank" rel="external">http://editorconfig.org/</a>) 之类的规范</li>
+<li>为了保持一致性，接受项目原有的风格</li>
+<li>直接使用 VIM 的 retab 命令</li>
+</ul>
+</li>
+<li><p>请写一个简单的幻灯效果页面</p>
+<ul>
+<li>如果不使用JS来完成，可以加分。</li>
+</ul>
+</li>
+<li><p>你都使用哪些工具来测试代码的性能？</p>
+<ul>
+<li>Profiler, JSPerf, Dromaeo</li>
+</ul>
+</li>
+<li><p>如果今年你打算熟练掌握一项新技术，那会是什么？</p>
+</li>
+<li><p>Long-Polling, Websockets, SSE(Server-Sent Event) 之间有什么区别？</p>
+</li>
+<li><p>请谈一下你对网页标准和标准制定机构重要性的理解。</p>
+</li>
+<li><p>什么是 FOUC（无样式内容闪烁）？你如何来避免 FOUC？</p>
+</li>
+<li><p>请尽可能完整得描述下从输入URL到整个网页加载完毕及显示在屏幕上的整个流程</p>
+</li>
+</ul>
+<p>###<a name="html">HTML相关问题：</a></p>
+<ul>
+<li><p><code>doctype</code>（文档类型）的作用是什么？</p>
+</li>
+<li><p>浏览器标准模式和怪异模式之间的区别是什么？</p>
+</li>
+<li><p>使用 XHTML 的局限有哪些？</p>
+<ul>
+<li>如果页面使用 ‘application/xhtml+xml’ 会有什么问题吗？</li>
+</ul>
+</li>
+<li><p>如果网页内容需要支持多语言，你会怎么做？</p>
+<ul>
+<li>在设计和开发多语言网站时，有哪些问题你必须要考虑？</li>
+</ul>
+</li>
+<li><p><code>data-</code>属性的作用是什么？</p>
+</li>
+<li><p>如果把 HTML5 看作做一个开放平台，那它的构建模块有哪些？</p>
+</li>
+<li><p>请描述一下 cookies，sessionStorage 和 localStorage 的区别？</p>
+</li>
+<li><p>请描述一下 <code>GET</code> 和 <code>POST</code> 的区别?</p>
+</li>
+</ul>
+<p>###<a name="css">CSS 相关问题：</a></p>
+<ul>
+<li><p>CSS 中类(classes)和 ID 的区别。</p>
+</li>
+<li><p>描述下 “reset” CSS 文件的作用和使用它的好处。</p>
+<ul>
+<li>期待能够指出它的负面影响，或者提到它的一个更好的替换者”normalize”</li>
+</ul>
+</li>
+<li><p>解释下浮动和它的工作原理。</p>
+</li>
+<li><p>描述<code>z-index</code>和叠加上下文是如何形成的。</p>
+</li>
+<li><p>列举不同的清除浮动的技巧，并指出它们各自适用的使用场景。</p>
+</li>
+<li><p>解释下 CSS sprites，以及你要如何在页面或网站中实现它。</p>
+</li>
+<li><p>你最喜欢的图片替换方法是什么，你如何选择使用。</p>
+</li>
+<li><p>讨论CSS hacks，条件引用或者其他。</p>
+</li>
+<li><p>如何为有功能限制的浏览器提供网页？</p>
+<ul>
+<li>你会使用哪些技术和处理方法？</li>
+</ul>
+</li>
+<li><p>有哪些的隐藏内容的方法（如果同时还要保证屏幕阅读器可用呢？）</p>
+</li>
+<li><p>你用过栅格系统吗？如果使用过，你最喜欢哪种？</p>
+</li>
+<li><p>你用过媒体查询，或针对移动端的布局/CSS 吗？</p>
+</li>
+<li><p>你熟悉 SVG 样式的书写吗？</p>
+</li>
+<li><p>如何优化网页的打印样式？</p>
+</li>
+<li><p>在书写高效 CSS 时会有哪些问题需要考虑？</p>
+</li>
+<li><p>使用 CSS 预处理器的优缺点有哪些？(SASS，Compass，Stylus，LESS)</p>
+<ul>
+<li>描述下你曾经使用过的 CSS 预处理的优缺点。</li>
+</ul>
+</li>
+<li><p>如果设计中使用了非标准的字体，你该如何去实现？</p>
+<ul>
+<li>Webfonts (字体服务例如：Google Webfonts，Typekit 等等。)</li>
+</ul>
+</li>
+<li><p>解释下浏览器是如何判断元素是否匹配某个 CSS 选择器？</p>
+</li>
+<li><p>解释一下你对盒模型的理解，以及如何在 CSS 中告诉浏览器使用不同的盒模型来渲染你的布局。</p>
+</li>
+<li><p>请解释一下</p>
+<figure class="highlight css"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">* <span class="rules">&#123; <span class="rule"><span class="attribute">box-sizing</span>:<span class="value"> border-box</span></span>; &#125;</span></span><br></pre></td></tr></table></figure>
+</li>
+</ul>
+<p>的作用, 并且说明使用它有什么好处？</p>
+<ul>
+<li><p>请罗列出你所知道的 display 属性的全部值</p>
+</li>
+<li><p>请解释一下 inline 和 inline-block 的区别？</p>
+</li>
+<li><p>请解释一下 relative、fixed、absolute 和 static 元素的区别</p>
+</li>
+<li><p>你目前在使用哪一套CSS框架，或者在产品线上使用过哪一套？(Bootstrap, PureCSS, Foundation 等等)</p>
+<ul>
+<li>如果有，请问是哪一套？如果可以，你如何改善CSS框架？</li>
+</ul>
+</li>
+<li><p>请问你有使用过 CSS Flexbox 或者 Grid specs 吗？</p>
+<ul>
+<li>如果有，请问在性能和效率的方面你是怎么看的？</li>
+</ul>
+</li>
+<li><p>为什么响应式设计（responsive design）和自适应设计（adaptive design）不同？</p>
+</li>
+<li><p>你有兼容 retina 屏幕的经历吗？如果有，在什么地方使用了何种技术？</p>
+</li>
+</ul>
+<p>###<a name="js">JS相关问题：</a></p>
+<ul>
+<li><p>解释下事件代理。</p>
+</li>
+<li><p>解释下 JavaScript 中 <code>this</code> 是如何工作的。</p>
+</li>
+<li><p>解释下原型继承的原理。</p>
+</li>
+<li><p>你是如何测试 JavaScript 代码的？</p>
+</li>
+<li><p>AMD vs. CommonJS？</p>
+</li>
+<li><p>什么是哈希表？</p>
+</li>
+<li><p>解释下为什么接下来这段代码不是 IIFE(立即调用的函数表达式)：<code>function foo(){ }();</code>.</p>
+<ul>
+<li>要做哪些改动使它变成 IIFE?</li>
+</ul>
+</li>
+<li><p>描述以下变量的区别：<code>null</code>，<code>undefined</code> 或 <code>undeclared</code>？</p>
+<ul>
+<li>该如何检测它们？</li>
+</ul>
+</li>
+<li><p>什么是闭包，如何使用它，为什么要使用它？</p>
+</li>
+<li><p>请举出一个匿名函数的典型用例？</p>
+</li>
+<li><p>解释 “JavaScript 模块模式” 以及你在何时使用它。</p>
+<ul>
+<li>如果有提到无污染的命名空间，可以考虑加分。</li>
+<li>如果你的模块没有自己的命名空间会怎么样？</li>
+</ul>
+</li>
+<li><p>你是如何组织自己的代码？是使用模块模式，还是使用经典继承的方法？</p>
+</li>
+<li><p>请指出 JavaScript 宿主对象和原生对象的区别？</p>
+</li>
+<li><p>指出下列代码的区别：</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">function</span> <span class="title">Person</span>(<span class="params"></span>)</span>&#123;&#125;</span><br><span class="line"><span class="keyword">var</span> person = Person();</span><br><span class="line"><span class="keyword">var</span> person = <span class="keyword">new</span> Person();</span><br></pre></td></tr></table></figure>
+</li>
+<li><p><code>.call</code> 和 <code>.apply</code> 的区别是什么？</p>
+</li>
+<li><p>请解释 <code>Function.prototype.bind</code>？</p>
+</li>
+<li><p>你何时优化自己的代码？</p>
+</li>
+<li><p>在什么时候你会使用 <code>document.write()</code>？</p>
+<ul>
+<li>大多数生成的广告代码依旧使用 <code>document.write()</code>，虽然这种用法会让人很不爽。</li>
+</ul>
+</li>
+<li><p>请指出浏览器特性检测，特性推断和浏览器 UA 字符串嗅探的区别？</p>
+</li>
+<li><p>请尽可能详尽的解释 AJAX 的工作原理。</p>
+</li>
+<li><p>请解释 JSONP 的工作原理，以及它为什么不是真正的 AJAX。</p>
+</li>
+<li><p>你使用过 JavaScript 模板系统吗？</p>
+<ul>
+<li>如有使用过，请谈谈你都使用过哪些库，比如 Mustache.js，Handlebars 等等。</li>
+</ul>
+</li>
+<li><p>请解释变量声明提升。</p>
+</li>
+<li><p>请描述下事件冒泡机制。</p>
+</li>
+<li><p>“attribute” 和 “property” 的区别是什么？</p>
+</li>
+<li><p>为什么扩展 JavaScript 内置对象不是好的做法？</p>
+</li>
+<li><p>请指出 document load 和 document ready 两个事件的区别。</p>
+</li>
+<li><p><code>==</code> 和 <code>===</code> 有什么不同？</p>
+</li>
+<li><p>请解释一下 JavaScript 的同源策略。</p>
+</li>
+<li><p>如何实现下列代码：</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">[<span class="number">1</span>,<span class="number">2</span>,<span class="number">3</span>,<span class="number">4</span>,<span class="number">5</span>].duplicator(); <span class="comment">// [1,2,3,4,5,1,2,3,4,5]</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p>什么是三元表达式？“三元” 表示什么意思？</p>
+</li>
+<li><p>什么是 <code>&quot;use strict&quot;;</code> ? 使用它的好处和坏处分别是什么？</p>
+</li>
+</ul>
+<p>###<a name="jquery">jQuery 相关问题：</a></p>
+<ul>
+<li><p>解释”chaining”。</p>
+</li>
+<li><p>解释”deferreds”。</p>
+</li>
+<li><p>你知道哪些针对 jQuery 的优化方法。</p>
+</li>
+<li><p>请解释 <code>.end()</code> 的用途。</p>
+</li>
+<li><p>你如何给一个事件处理函数命名空间，为什么要这样做？</p>
+</li>
+<li><p>请说出你可以传递给 jQuery 方法的四种不同值。</p>
+<ul>
+<li>选择器（字符串），HTML（字符串），回调函数，HTML元素，对象，数组，元素数组，jQuery对象等。</li>
+</ul>
+</li>
+<li><p>什么是效果队列？</p>
+</li>
+<li><p>请指出 <code>.get()</code>，<code>[]</code>，<code>eq()</code> 的区别。</p>
+</li>
+<li><p>请指出 <code>.bind()</code>，<code>.live()</code> 和 <code>.delegate()</code> 的区别。</p>
+</li>
+<li><p>请指出 <code>$</code> 和 <code>$.fn</code> 的区别，或者说出 <code>$.fn</code> 的用途。</p>
+</li>
+<li><p>请优化下列选择器：</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">$(<span class="string">".foo div#bar:eq(0)"</span>)</span><br></pre></td></tr></table></figure>
+</li>
+</ul>
+<p>###<a name="jscode">代码相关的问题：</a></p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">modulo(<span class="number">12</span>, <span class="number">5</span>) <span class="comment">// 2</span></span><br></pre></td></tr></table></figure>
+<p>问题：实现满足上述结果的modulo函数</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="string">"i'm a lasagna hog"</span>.split(<span class="string">""</span>).reverse().join(<span class="string">""</span>);</span><br></pre></td></tr></table></figure>
+<p>问题：上面的语句的返回值是什么？<br><strong>答案：”goh angasal a m’i”</strong></p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">( <span class="built_in">window</span>.foo || ( <span class="built_in">window</span>.foo = <span class="string">"bar"</span> ) );</span><br></pre></td></tr></table></figure>
+<p>问题：window.foo 的值是什么？<br><strong>答案：”bar”</strong><br>只有 window.foo 为假时的才是上面答案，否则就是它本身的值。</p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> foo = <span class="string">"Hello"</span>; (<span class="function"><span class="keyword">function</span>(<span class="params"></span>) </span>&#123; <span class="keyword">var</span> bar = <span class="string">" World"</span>; alert(foo + bar); &#125;)(); alert(foo + bar);</span><br></pre></td></tr></table></figure>
+<p>问题：上面两个 alert 的结果是什么<br><strong>答案: “Hello World” 和 ReferenceError: bar is not defined</strong></p>
+<figure class="highlight javascript"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">var</span> foo = [];</span><br><span class="line">foo.push(<span class="number">1</span>);</span><br><span class="line">foo.push(<span class="number">2</span>);</span><br></pre></td></tr></table></figure>
+<p>问题：foo.length 的值是什么？<br><strong>答案：<code>2</code></strong></p>
+<p>###<a name="fun">有趣的问题：</a></p>
+<ul>
+<li><p>你编写过的最酷的代码是什么？其中你最自豪的是什么？</p>
+</li>
+<li><p>在你使用的开发工具中，最喜欢哪些方面？</p>
+</li>
+<li><p>你有什么业余项目吗？是哪种类型的？</p>
+</li>
+<li><p>你最爱的 IE 特性是什么？</p>
+</li>
+</ul>
+<p>###<a name="references">其他参考资料：</a></p>
+<ul>
+<li><a href="http://programmers.stackexchange.com/questions/46716/what-technical-details-should-a-programmer-of-a-web-application-consider-before" target="_blank" rel="external">http://programmers.stackexchange.com/questions/46716/what-technical-details-should-a-programmer-of-a-web-application-consider-before</a></li>
+<li><a href="http://www.nczonline.net/blog/2010/01/05/interviewing-the-front-end-engineer/" target="_blank" rel="external">http://www.nczonline.net/blog/2010/01/05/interviewing-the-front-end-engineer/</a></li>
+<li><a href="http://css-tricks.com/interview-questions-css/" target="_blank" rel="external">http://css-tricks.com/interview-questions-css/</a></li>
+<li><a href="http://davidshariff.com/quiz/" target="_blank" rel="external">http://davidshariff.com/quiz/</a></li>
+<li><a href="http://blog.sourcing.io/interview-questions" target="_blank" rel="external">http://blog.sourcing.io/interview-questions</a></li>
+<li><a href="http://www.toptal.com/javascript/interview-questions" target="_blank" rel="external">http://www.toptal.com/javascript/interview-questions</a></li>
+</ul>
+<p>###<a name="license">协议:</a></p>
+<p>Copyright 2012 by Darcy Clarke, 基于<a href="http://opensource.org/licenses/MIT" target="_blank" rel="external">MIT License</a> 协议。点击协议文件查看详细。</p>
+]]></content>
+    <summary type="html">
+    <![CDATA[<p>原文地址: <a href="http://blog.zhangruipeng.me/2015/03/15/JavaScript-Interview-1/">http://blog.zhangruipeng.me/2015/03/15/JavaScript-Interview-1/</a></p>
+<p><strong>备注:</strong> 本 repo 包含了一些前端面试问题用于考查候选者。不建议对单个候选者问及每个问题（那需要好几个小时）。只要从列表里挑选一些，就能帮助你考查候选者是否具备所需要的技能了。</p>
+<p><a href="http://rmurphey.com/">Rebecca Murphey</a> 的 <a href="http://rmurphey.com/blog/2012/04/12/a-baseline-for-front-end-developers/">Baseline For Front-End Developers</a> 是你在准备面试前应该阅读的绝佳资源。</p>
+<p><strong>记住：</strong> 很多问题都是开放的，可以引发有趣的讨论。这比直接的答案更能体现此人的能力。<br>]]>
+    
+    </summary>
+    
+      <category term="Interview" scheme="http://fusueva.com/tags/Interview/"/>
+    
+      <category term="Front-End" scheme="http://fusueva.com/categories/Front-End/"/>
+    
+  </entry>
+  
+</feed>
